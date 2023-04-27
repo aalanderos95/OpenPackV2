@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from omegaconf import DictConfig
 from torchmetrics.functional import accuracy as accuracy_score
-
+from torchmetrics.functional import f1_score
 logger = getLogger(__name__)
 
 
@@ -37,7 +37,12 @@ class BaseLightningModule(pl.LightningModule):
                 lr=self.cfg.train.optimizer.lr,
                 weight_decay=self.cfg.train.optimizer.weight_decay,
             )
-            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.1)
+            scheduler = torch.optim.lr_scheduler.MultiStepLR(
+                optimizer,
+                milestones=self.cfg.train.optimizer.multistep_milestones,
+                gamma=self.cfg.train.optimizer.multistep_gamma,
+            )
+            #scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.1)
         elif self.cfg.train.optimizer.type == "SGD":
             optimizer = torch.optim.SGD(
                 self.parameters(),
@@ -93,12 +98,45 @@ class BaseLightningModule(pl.LightningModule):
                 log[f"train/{key}"] = torch.stack(vals).mean().item()
         self.log_dict["train"].append(log)
 
-    def validation_step(
-            self,
-            batch: Dict,
-            batch_idx: int,
-            dataloader_idx: int = 0) -> Dict:
-        return self.training_step(batch, batch_idx)
+    def validation_step(self, batch: Dict, batch_idx: int, dataloader_idx: int = 0) -> Dict:
+        (
+            x_imu,
+            t_imu,
+            ts_imu,
+            x_e4acc,
+            x_keypoints,
+            x_bbox,
+            x_ht,
+            x_printer
+        ) = self.split_data(batch)
+
+        if self.v2:
+            y_hat = self.net(x_imu,
+                x_e4acc,
+                x_keypoints,
+                x_bbox,
+                x_ht,
+                x_printer).squeeze(3)
+        else:
+            y_hat = self.net(x_imu,
+                x_e4acc,
+                x_keypoints,
+                x_bbox,
+                x_ht,
+                x_printer).squeeze(3)
+        
+        loss = self.criterion(y_hat, t_imu)
+        acc = self.calc_accuracy(y_hat, t_imu)
+
+        if batch_idx == 0:
+            self.val_y_batch = []
+            self.val_t_batch = []
+        self.val_y_batch.append(y_hat)
+        self.val_t_batch.append(t_imu)
+        return {"loss": loss, "acc": acc}
+    
+        #return self.training_step(batch, batch_idx)
+    
 
     def adjust_learning_rate(self):
         #Se ajustaran el learning rate dependiendo la epoca contenida en params
@@ -123,26 +161,45 @@ class BaseLightningModule(pl.LightningModule):
             if len(vals) > 0:
                 avg = torch.stack(vals).mean().item()
                 log[f"val/{key}"] = avg
-        self.log_dict["val"].append(log)
-        
         
         if(self.cfg.dynamicLr):
             self.adjust_learning_rate()
+        
+        val_y = torch.concat(self.val_y_batch)
+        val_t = torch.concat(self.val_t_batch)
+        f1macro = self.calc_f1macro(val_y, val_t)
+        log["val/f1macro"] = f1macro
+
+        self.log_dict["val"].append(log)
+
         self.print_latest_metrics()
-        
 
-
-        
         if len(self.log_dict["val"]) > 0:
             val_loss = self.log_dict["val"][-1].get("val/loss", None)
-            self.log(
-                "val/loss",
-                val_loss,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True)
+            self.log("val_loss", val_loss, on_step=False, on_epoch=True, prog_bar=False, logger=True)
+            val_acc = self.log_dict["val"][-1].get("val/acc", None)
+            self.log("val_acc", val_acc, on_step=False, on_epoch=True, prog_bar=False, logger=True)
+            self.log("val_f1macro", f1macro, on_step=False, on_epoch=True, prog_bar=False, logger=True)
 
+    def calc_f1macro(self, y: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        preds = F.softmax(y, dim=1)
+        (batch_size, num_classes, window_size) = preds.size()
+        preds_flat = preds.permute(1, 0, 2).reshape(num_classes, batch_size * window_size)
+        t_flat = t.reshape(-1)
+
+        ignore_index = num_classes - 1
+        f1macro = f1_score(
+            preds_flat.transpose(0, 1),
+            t_flat,
+            task="multiclass",
+            average="macro",
+            num_classes=num_classes,
+            ignore_index=ignore_index,
+        )
+        return f1macro
+    
+    
+    
     def test_step(self, batch: Dict, batch_idx: int) -> Dict:
         raise NotImplementedError()
 
@@ -168,7 +225,7 @@ class BaseLightningModule(pl.LightningModule):
         log_template = (
             "Epoch[{epoch:0=3}]"
             " TRAIN: loss={train_loss:>7.4f}, acc={train_acc:>7.4f}"
-            " | VAL: loss={val_loss:>7.4f}, acc={val_acc:>7.4f}"
+            " | VAL: loss={val_loss:>7.4f}, acc={val_acc:>7.4f}, f1macro={val_f1macro:>7.4f}"
             " | LR: {lr:>7.4f}"
             " | WD: {wd:>7.4f}"
         )
@@ -180,6 +237,7 @@ class BaseLightningModule(pl.LightningModule):
                 train_acc=train_log.get("train/acc", -1),
                 val_loss=val_log.get("val/loss", -1),
                 val_acc=val_log.get("val/acc", -1),
+                val_f1macro=val_log.get("val/f1macro", -1),
                 lr=opt.param_groups[0]['lr'],
                 wd=opt.param_groups[0]['weight_decay'],
             )

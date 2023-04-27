@@ -19,7 +19,7 @@ from einops import rearrange
 import matplotlib.image as img
 
 from pykalman import KalmanFilter
-from .dataloader import (load_imu_all,load_imu_new,load_imu, loadImage, load_e4acc, load_imu_ant)
+from .dataloader import (load_imu_all,load_imu_new,load_imu, loadImage, load_e4acc, load_imu_ant, load_bbox)
 import os
 logger = getLogger(__name__)
 
@@ -328,7 +328,6 @@ class OpenPackImuAll(torch.utils.data.Dataset):
                     cfg.dataset.stream.path_e4acc.fname
                 )
                 paths_e4acc.append(path)
-
             x_sess_e4acc, ts_sess_e4acc = load_e4acc(paths_e4acc)
 
             x_sAll.append(x_sess_e4acc)
@@ -344,16 +343,24 @@ class OpenPackImuAll(torch.utils.data.Dataset):
             x_sess_keypoints = x_sess_keypoints[:(x_sess_keypoints.shape[0] - 1)]  # Remove prediction score.
             x_sess_keypoints = x_sess_keypoints.transpose(1, 0, 2)
             
-           
+            
             x_sAll.append(x_sess_keypoints)
             ts_sAll.append(ts_sess_keypoint)
             nameData.append("keypoints")
+        
+            #BBOX [3]            
+            ts_sess_bbox, x_sess_bbox = load_bbox(pathKeypoints)
 
+            x_sAll.append(x_sess_bbox)
+            ts_sAll.append(ts_sess_bbox)
+            nameData.append("bbox")
+
+            
+           
            
             x_sAll, ts_sAll = self.remuestreo_padding(x_sAll, ts_sAll, nameData)
 
-
-            #HT [3]
+            #HT [4]
             pathht = Path(
                 cfg.dataset.stream.path_ht.dir,
                 cfg.dataset.stream.path_ht.fname,
@@ -362,7 +369,7 @@ class OpenPackImuAll(torch.utils.data.Dataset):
             
             x_sAll.append(x_sess_ht)
 
-            #Printer [4]
+            #Printer [5]
 
             path_printer = Path(
                 cfg.dataset.stream.path_printer.dir,
@@ -394,8 +401,9 @@ class OpenPackImuAll(torch.utils.data.Dataset):
                 "dataimu": x_sAll[0],
                 "datae4acc": x_sAll[1],
                 "datakeypoints": x_sAll[2],
-                "dataht": x_sAll[3],
-                "dataprinter": x_sAll[4],
+                "databbox": x_sAll[3],
+                "dataht": x_sAll[4],
+                "dataprinter": x_sAll[5],
                 "label": label,
                 "unixtime": ts_sAll[0],
             })
@@ -726,6 +734,9 @@ class OpenPackImuAll(torch.utils.data.Dataset):
         #KEYPOINTS
         keypoints = seq_data["datakeypoints"][:,:, head:tail, np.newaxis]
         
+        #BBOX
+        bbox = seq_data["databbox"][:, head:tail, np.newaxis]
+
         #HT
         ht = seq_data["dataht"][head:tail,np.newaxis]
 
@@ -744,7 +755,10 @@ class OpenPackImuAll(torch.utils.data.Dataset):
                        mode="constant", constant_values=0)
             printer = np.pad(printer, [(0, pad_tail),(0,0)],
                        mode="constant", constant_values=0)
-           
+
+            bbox = np.pad(bbox, [(0, 0), (0, pad_tail), (0, 0)],
+                       mode="constant", constant_values=0)
+
             keypoints = np.pad(keypoints, [(0, 0), (0, 0), (0, pad_tail), (0, 0)],
                        mode="constant", constant_values=0)
             label = np.pad(label, [(0, pad_tail)], mode="constant",
@@ -757,6 +771,7 @@ class OpenPackImuAll(torch.utils.data.Dataset):
         ts = torch.from_numpy(ts)
         x_e4acc = torch.from_numpy(e4acc)
         x_keypoints = torch.from_numpy(keypoints)
+        x_bbox = torch.from_numpy(bbox)
         ht = torch.from_numpy(ht)
         printer = torch.from_numpy(printer)
 
@@ -766,6 +781,7 @@ class OpenPackImuAll(torch.utils.data.Dataset):
             "unixtime": ts,
             "x_e4acc": x_e4acc,
             "x_keypoints": x_keypoints,
+            "x_bbox": x_bbox,
             "x_ht": ht,
             "x_printer": printer,
             }

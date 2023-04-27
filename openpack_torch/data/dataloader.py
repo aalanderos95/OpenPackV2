@@ -45,6 +45,38 @@ def load_keyfpoints(path: Path) -> Tuple[np.ndarray, np.ndarray]:
 
     return T, X
 
+def load_bbox(path: Path) -> Tuple[np.ndarray, np.ndarray]:
+    """Load keypoints from JSON.
+
+    Args:
+        path (Path): path to a target JSON file.
+    Returns:
+        Tuple[np.ndarray, np.ndarray]:
+            * T (np.ndarray): unixtime for each frame.
+            * X (np.ndarray): xy-cordinates of keypoints. and the score of corresponding
+                prediction. shape=(3, FRAMES, NODE). The first dim is corresponding to
+                [x-cordinate, y-cordinate, score].
+    Todo:
+        * Handle the JSON file that contains keypoints from multiple people.
+    """
+    with open(path, "r") as f:
+        data = json.load(f)
+    logger.debug(f"load keypoints from {path}")
+
+    T, X = [], []
+    for i, d in enumerate(data["annotations"][:]):
+        ut = d.get("image_id", -1)
+        kp = np.array(d.get("bbox", []))
+
+        X.append(kp.T)
+        T.append(ut)
+
+    T = np.array(T)
+    X = np.stack(X, axis=1)
+
+    return T, X
+
+
 def loadImage( 
     paths: Union[Tuple[Path, ...], List[Path]],
     names = [],
